@@ -13,6 +13,19 @@ HOST = 'localhost'
 PORT = 8808
 EXIT_FLAG = 0
 
+IP_blocked = [
+    '128.199.144.88',
+]
+
+restrict_users = [
+    '128.199.144.88',
+]
+
+IP_allowed = [
+    '192.168.',
+    '127.0.0.1',
+]
+
 class Storage(dict):
     def __getattr__(self, key):
         try:
@@ -86,7 +99,6 @@ class ConnectionHandler(object):
             self.req.header[attr] = value
 
     def _connect_handler(self):
-        print self.req.first_line
         host = self.req.path
         i = host.find(':')
         if i!=-1:
@@ -97,6 +109,10 @@ class ConnectionHandler(object):
 
         try:
             (family, _, _, _, address) = socket.getaddrinfo(host, port)[0]
+
+            self._filter(address)
+            print self.req.first_line
+
             self.target = socket.socket(family)
             self.target.connect(address)
         except socket.error:
@@ -170,6 +186,9 @@ class ConnectionHandler(object):
 
         try:
             (family, _, _, _, address) = socket.getaddrinfo(host, port)[0]
+
+            self._filter(address)
+
             self.target = socket.socket(family)
             self.target.connect(address)
         except socket.error:
@@ -272,6 +291,28 @@ class ConnectionHandler(object):
 
     def _process_response(self):
         pass
+
+    def _filter(self, address):
+        # 开始墙人
+        if address[0] in IP_blocked:
+            self.connection.send('HTTP/1.1 403 Forbidden\r\n\r\nForbidden\r\n')
+            self.connection.close()
+            print self.req.first_line, '\033[033m IP Blocked! \033[0m'
+            exit(0)
+        if self.addr[0] in restrict_users:
+            if not self._ip_is_allowed(address[0]):
+                self.connection.send('HTTP/1.1 303 See other\r\nLocation: http://localhost\r\nVia: 1.1 ' + BAND + '\r\n\r\n')
+                self.connection.close()
+                print self.req.first_line, '\033[033m User Redirected! \033[0m'
+                exit(0)
+
+    def _ip_is_allowed(self, ip):
+        valid = False
+        for each in IP_allowed:
+            if ip.startswith(each):
+                valid = True
+                break
+        return valid
 
 
 class ProxyServer(object):

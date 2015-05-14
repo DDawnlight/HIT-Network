@@ -1,0 +1,31 @@
+#!/bin/sh
+
+NAME=GFW
+DAEMON="python main.py"
+PIDFILE="gfw.pid"
+
+case "$1" in
+    start)
+        echo "Start $NAME: "
+        $DAEMON
+        echo $! > $PIDFILE
+            ;;
+    stop)
+        echo "Stopping $NAME: "
+            pid=`cat $PIDFILE`
+            echo "killing "+$pid
+        kill $pid
+            rm $PIDFILE
+            ;;
+    restart)
+        echo "Stopping $NAME: "
+            pid=`cat $PIDFILE`
+            echo "killing "+$pid
+        kill $pid
+        rm $PIDFILE
+        echo "Start NAME: "
+        $DAEMON
+        echo $! > $PIDFILE
+esac
+
+exit 0
