@@ -3,15 +3,21 @@
 
 import threading
 import socket, select
-import time
+import time, base64
+import os
 
+# 版本信息
 __version__ = '0.0.1'
+# 代理信息
 BAND = 'GFW/' + __version__
-BUFFLEN = 4 * 1024
-TIMEOUT = 1
-HOST = 'localhost'
-PORT = 8808
-EXIT_FLAG = 0
+
+BUFFLEN = 4 * 1024 # 最大接收尺寸
+TIMEOUT = 1  # 超时时间
+HOST = 'localhost' # 主机名
+PORT = 8808        # 端口号
+EXIT_FLAG = 0      # 结束标识
+
+Cache_dir = 'cache/'
 
 IP_blocked = [
     '128.199.144.88',
@@ -69,6 +75,9 @@ class ConnectionHandler(object):
         exit(0)
 
     def _analyse_request(self):
+        '''
+        解析客户端请求
+        '''
         while True:
             data = self.connection.recv(BUFFLEN)
             self.buff += data
@@ -99,6 +108,9 @@ class ConnectionHandler(object):
             self.req.header[attr] = value
 
     def _connect_handler(self):
+        '''
+        处理CONNECT方法， 用于https
+        '''
         host = self.req.path
         i = host.find(':')
         if i!=-1:
@@ -148,6 +160,9 @@ class ConnectionHandler(object):
                 break
 
     def _process_request(self):
+        '''
+        处理http请求
+        '''
         pack_to_sent = ''
 
         # 添加 代理服务器标识
@@ -159,13 +174,13 @@ class ConnectionHandler(object):
 
         # 获取主机信息
         info = self.req.header.get('Host', '').split(':')
-        host = info[0]
+        self.req.host = info[0]
         port = len(info) > 1 and int(info[1]) or 80
-        if not host: # 请求头应该包含Host属性， 如没有， 提示无法识别
+        if not self.req.host: # 请求头应该包含Host属性， 如没有， 提示无法识别
             self.connection.send('HTTP/1.1 403 Forbidden\r\n\r\nRequest UnRecognize.\r\n')
             self.connection.close()
             exit(1)
-        if host == HOST and port == PORT:  # 目标服务器不能是代理服务器
+        if self.req.host == HOST and port == PORT:  # 目标服务器不能是代理服务器
             self.connection.send('HTTP/1.1 403 Forbidden\r\n\r\nInvalid Request!\r\n')
             self.connection.close()
             exit(0)
@@ -177,6 +192,10 @@ class ConnectionHandler(object):
             pack_to_sent += 'Host: ' + self.req.header['Host'] + '\r\n'
             del self.req.header['Host']
         # 报文头
+        if self.req.method == 'GET' and os.path.isfile(Cache_dir + base64.b64encode(self.req.path)):
+            with open(Cache_dir + base64.b64encode(self.req.path)) as f:
+                pack_to_sent += f.read().split('\r\n\r\n', 1)[0]
+
         for key, value in self.req.header.iteritems():
             pack_to_sent += key + ':'  + value + '\r\n'
         pack_to_sent += '\r\n'
@@ -185,7 +204,7 @@ class ConnectionHandler(object):
             pack_to_sent += self.req.body + '\r\n'
 
         try:
-            (family, _, _, _, address) = socket.getaddrinfo(host, port)[0]
+            (family, _, _, _, address) = socket.getaddrinfo(self.req.host, port)[0]
 
             self._filter(address)
 
@@ -202,6 +221,9 @@ class ConnectionHandler(object):
         self._analyse_response()
 
     def _analyse_response(self):
+        '''
+        分析http响应报文
+        '''
         # 接收服务器数据
         rec_buff = self._receive_timeout()
         if not rec_buff:
@@ -231,31 +253,10 @@ class ConnectionHandler(object):
             value = l[1].strip()
             self.res.header[attr] = value
 
-        # 添加 代理服务器标识
-        if 'Via' in self.res.header:
-            self.res.header.Via += ', 1.1 ' + BAND
-        else:
-            self.res.header.Via = '1.1 ' + BAND
-
-
-        #  构造报文 起始行
-        reply_pack = self.res.first_line + '\r\n'
-        # 报文头
-        for key, value in self.res.header.iteritems():
-            reply_pack += key + ':'  + value + '\r\n'
-        reply_pack += '\r\n'
-        reply_pack += self.res.get('body', '')
-
-        # 发送响应报文头
-        self.connection.send(reply_pack)
-        # 发送响应报文体
-        print self.req.first_line, '\033[033m', self.res.status, '\033[0m'
-
-        self.target.close()
-
     def _receive_timeout(self):
-
-        #non blocking
+        '''
+        接收http响应报文
+        '''
         self.target.setblocking(0)
         rec_buff = ''
         data=''
@@ -290,7 +291,36 @@ class ConnectionHandler(object):
         return rec_buff
 
     def _process_response(self):
-        pass
+        '''
+        处理http响应报文
+        '''
+        # 添加 代理服务器标识
+        if 'Via' in self.res.header:
+            self.res.header.Via += ', 1.1 ' + BAND
+        else:
+            self.res.header.Via = '1.1 ' + BAND
+
+        # 判断是否需要进行缓存
+        if self.req.method == 'GET':
+            if self.res.status.startswith('304'):
+                self._reply_from_cache()
+            if hasattr(self.res.header, 'Last-Modified') and self.res.status.startswith('200'):
+                self._cache_response()
+
+        #  构造报文 起始行
+        reply_pack = self.res.first_line + '\r\n'
+        # 报文头
+        for key, value in self.res.header.iteritems():
+            reply_pack += key + ':'  + value + '\r\n'
+        reply_pack += '\r\n'
+        reply_pack += self.res.get('body', '')
+
+        # 发送响应报文头
+        self.connection.send(reply_pack)
+        # 发送响应报文体
+        print self.req.first_line, '\033[033m', self.res.status, '\033[0m'
+
+        self.target.close()
 
     def _filter(self, address):
         # 开始墙人
@@ -314,6 +344,43 @@ class ConnectionHandler(object):
                 break
         return valid
 
+    def _cache_response(self):
+        '''
+        对get 200请求进行缓存
+        '''
+        # 删除所有浏览器缓存相关头部
+        if hasattr(self.res.header, 'ETag'):
+            del self.res.header['ETag']
+        if hasattr(self.res.header, 'expires'):
+            del self.res.header['expires']
+        if hasattr(self.res.header, 'Cache-Control'):
+            del self.res.header['Cache-Control']
+
+        with open(Cache_dir + base64.b64encode(self.req.path), 'w') as f:
+            f.write('If-Modified-Since: '+ self.res.header['Last-Modified'] + '\r\n\r\n' + self.res.body)
+
+        if hasattr(self.res.header, 'Last-Modified'):
+            del self.res.header['Last-Modified']
+
+
+    def _reply_from_cache(self):
+        self.res.first_line = 'HTTP/1.1 200 OK from cache'
+        # 删除所有浏览器缓存相关头部
+        if hasattr(self.res.header, 'ETag'):
+            del self.res.header['ETag']
+        if hasattr(self.res.header, 'expires'):
+            del self.res.header['expires']
+        if hasattr(self.res.header, 'Cache-Control'):
+            del self.res.header['Cache-Control']
+        if hasattr(self.res.header, 'Last-Modified'):
+            del self.res.header['Last-Modified']
+        # try:
+        print 'read', Cache_dir + base64.b64encode(self.req.path)
+        with open(Cache_dir + base64.b64encode(self.req.path)) as f:
+            self.res.body = f.read().split('\r\n\r\n', 1)[1]
+        # except:
+            # pass
+
 
 class ProxyServer(object):
     '''
@@ -325,6 +392,7 @@ class ProxyServer(object):
         配置代理服务器主机, 端口, 最大连接数
         请求处理函数的等信息
         '''
+        self.host = host
         self.addr = (host, port)
         self.timeout = timeout
         self.connections = connections
@@ -335,7 +403,7 @@ class ProxyServer(object):
         tcpSerSock.bind(self.addr)
         tcpSerSock.listen(self.connections)
         # 创建TCP服务器, 循环检查是否有请求
-        print 'Proxy server is running at http://localhost:' + str(self.addr[1])
+        print 'Proxy server is running at http://:' + self.host + ':' + str(self.addr[1])
         try:
             while True:
                 tcpCliSock, addr = tcpSerSock.accept()  # 收到请求
