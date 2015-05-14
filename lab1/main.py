@@ -2,8 +2,8 @@
 #coding=utf-8
 
 import threading
-import socket
-import string, time
+import socket, select
+import time
 
 __version__ = '0.0.1'
 BAND = 'GFW/' + __version__
@@ -11,6 +11,7 @@ BUFFLEN = 4 * 1024
 TIMEOUT = 1
 HOST = 'localhost'
 PORT = 8808
+EXIT_FLAG = 0
 
 class Storage(dict):
     def __getattr__(self, key):
@@ -45,10 +46,14 @@ class ConnectionHandler(object):
         self.res = Storage()
 
         self._analyse_request()  # 分析请求
-        self._process_request()  # 处理请求, 发送并分析响应
-        self._process_response() # 处理响应，向客户返回数据
+        if self.req.method == 'CONNECT':
+            self._connect_handler()
+        else:
+            self._process_request()  # 处理请求, 发送并分析响应
+            self._process_response() # 处理响应，向客户返回数据
 
         self.connection.close()
+        exit(0)
 
     def _analyse_request(self):
         while True:
@@ -61,12 +66,11 @@ class ConnectionHandler(object):
         headers = content[0].split('\r\n')
 
         try:
-
-            self.req.body = content[1]
+            self.req.body = len(content) > 1 and content[1] or ''
             self.req.method = headers[0].split(' ')[0]
+            self.req.path = headers[0].split(' ', 2)[1]
             self.req.first_line = headers[0]
         except Exception:  # 非法请求， 退出线程
-            print "Invalid Request"
             self.connection.send('HTTP/1.1 403 Forbidden\r\n\r\nInvalid Request!\r\n')
             self.connection.close()
             exit(0)
@@ -81,6 +85,52 @@ class ConnectionHandler(object):
             value = l[1].strip()
             self.req.header[attr] = value
 
+    def _connect_handler(self):
+        print self.req.first_line
+        host = self.req.path
+        i = host.find(':')
+        if i!=-1:
+            port = int(host[i+1:])
+            host = host[:i]
+        else:
+            port = 80
+
+        try:
+            (family, _, _, _, address) = socket.getaddrinfo(host, port)[0]
+            self.target = socket.socket(family)
+            self.target.connect(address)
+        except socket.error:
+            self.connection.send('HTTP/1.1 502 Bad gateway\r\n\r\nBad gateway\r\n')
+            if hasattr(self, 'target'):
+                self.target.close()
+            self.connection.close()
+            exit(1)
+
+        self.connection.send('HTTP/1.1'+' 200 Connection established\n'+
+                         'Proxy-agent: %s\n\n'%BAND)
+
+        socs = [self.connection, self.target]
+        timeout_max = 10
+
+        count = 0
+        while True:
+            count += 1
+            (recv, _, error) = select.select(socs, [], socs, 3)
+            if error:
+                break
+            if recv:
+                for in_ in recv:
+                    data = in_.recv(BUFFLEN)
+                    if in_ is self.connection:
+                        out = self.target
+                    else:
+                        out = self.connection
+                    if data:
+                        out.send(data)
+                        count = 0
+            if count == timeout_max:
+                break
+
     def _process_request(self):
         pack_to_sent = ''
 
@@ -94,14 +144,12 @@ class ConnectionHandler(object):
         # 获取主机信息
         info = self.req.header.get('Host', '').split(':')
         host = info[0]
-        port = len(info) > 1 and string.atoi(info[1]) or 80
+        port = len(info) > 1 and int(info[1]) or 80
         if not host: # 请求头应该包含Host属性， 如没有， 提示无法识别
             self.connection.send('HTTP/1.1 403 Forbidden\r\n\r\nRequest UnRecognize.\r\n')
-            print "Request UnRecognize."
             self.connection.close()
             exit(1)
         if host == HOST and port == PORT:  # 目标服务器不能是代理服务器
-            print "Invalid Request"
             self.connection.send('HTTP/1.1 403 Forbidden\r\n\r\nInvalid Request!\r\n')
             self.connection.close()
             exit(0)
@@ -120,13 +168,14 @@ class ConnectionHandler(object):
         if 'body' in self.req:
             pack_to_sent += self.req.body + '\r\n'
 
-        (family, _, _, _, address) = socket.getaddrinfo(host, port)[0]
-        self.target = socket.socket(family)
         try:
+            (family, _, _, _, address) = socket.getaddrinfo(host, port)[0]
+            self.target = socket.socket(family)
             self.target.connect(address)
         except socket.error:
-            self.connection.send('HTTP/1.1 504 Gateway timeout\r\n\r\nGateway timeout\r\n')
-            self.target.close()
+            self.connection.send('HTTP/1.1 502 Bad gateway\r\n\r\nBad gateway\r\n')
+            if hasattr(self, 'target'):
+                self.target.close()
             self.connection.close()
             exit(1)
         self.target.send(pack_to_sent)
@@ -137,7 +186,7 @@ class ConnectionHandler(object):
         # 接收服务器数据
         rec_buff = self._receive_timeout()
         if not rec_buff:
-            self.connection.send('HTTP/1.1 408 Request timeout\r\n\r\nrequest timeout.\r\n');
+            self.connection.send('HTTP/1.1 408 Request timeout\r\n\r\nRequest timeout.\r\n');
             self.target.close()
             self.connection.close()
             exit(0)
@@ -150,7 +199,7 @@ class ConnectionHandler(object):
             self.res.first_line = headers[0]
             self.res.header = Storage()
         except Exception:  # 返回的信息不完整或者格式错误, 算作超时
-            self.connection.send('HTTP/1.1 408 Request timeout\r\n\r\nrequest timeout.\r\n');
+            self.connection.send('HTTP/1.1 408 Request timeout\r\n\r\nRequest timeout.\r\n');
             self.target.close()
             self.connection.close()
             exit(0)
@@ -181,7 +230,7 @@ class ConnectionHandler(object):
         # 发送响应报文头
         self.connection.send(reply_pack)
         # 发送响应报文体
-        print self.req.first_line, self.res.status
+        print self.req.first_line, '\033[033m', self.res.status, '\033[0m'
 
         self.target.close()
 
@@ -193,8 +242,13 @@ class ConnectionHandler(object):
         data=''
 
         begin=time.time()
-        while 1:
+        while True:
             # 收到一些数据，等待超时退出
+            if EXIT_FLAG:
+                self.connection.send('Sorry, proxy is quitted.')
+                self.target.close()
+                self.connection.close()
+                exit(1)
             if rec_buff and time.time()-begin > self.timeout:
                 break
             # 没有收到数据， 稍微等会
@@ -209,6 +263,10 @@ class ConnectionHandler(object):
                     time.sleep(0.1)
             except:
                 pass
+                # self.connection.send('HTTP/1.1 502 Bad gateway\r\n\r\n');
+                # self.target.close()
+                # self.connection.close()
+                # exit(0)
 
         return rec_buff
 
@@ -249,11 +307,13 @@ class ProxyServer(object):
             pass
         finally:
             tcpSerSock.close()
-            print 'Proxy server has exit successfully.'
+            global EXIT_FLAG
+            EXIT_FLAG = 1
             import sys
             sys.exit(1)
 
 if __name__ == '__main__':
     proxySevr = ProxyServer(port = PORT, timeout = TIMEOUT)
     proxySevr.run_server()
+    print 'Proxy server has exit successfully.'
 
