@@ -3,8 +3,8 @@
 
 import threading
 import socket, select
-import time, base64
-import os
+import time
+import os, hashlib
 
 # 版本信息
 __version__ = '0.0.1'
@@ -14,17 +14,19 @@ BAND = 'GFW/' + __version__
 BUFFLEN = 4 * 1024 # 最大接收尺寸
 TIMEOUT = 1  # 超时时间
 HOST = 'localhost' # 主机名
-PORT = 8808        # 端口号
+PORT = 8888        # 端口号
 EXIT_FLAG = 0      # 结束标识
 
 Cache_dir = 'cache/'
 
 IP_blocked = [
-    '128.199.144.88',
+    '128.199.144.88',   # wentong.me
+    '219.217.227.180',  # www.hit.edu.cn
 ]
 
 restrict_users = [
     '128.199.144.88',
+    # '127.0.0.1',
 ]
 
 IP_allowed = [
@@ -78,10 +80,11 @@ class ConnectionHandler(object):
         '''
         解析客户端请求
         '''
+        # 接收请求， 采用阻塞式
         while True:
             data = self.connection.recv(BUFFLEN)
             self.buff += data
-            if len(data) < BUFFLEN:
+            if '\r\n\r\n' in self.buff:
                 break
         # 解析
         content = self.buff.split('\r\n\r\n', 1)
@@ -128,6 +131,7 @@ class ConnectionHandler(object):
             self.target = socket.socket(family)
             self.target.connect(address)
         except socket.error:
+            print self.req.first_line, '\033[034m', 'Failed', '\033[0m'
             self.connection.send('HTTP/1.1 502 Bad gateway\r\n\r\nBad gateway\r\n')
             if hasattr(self, 'target'):
                 self.target.close()
@@ -177,10 +181,12 @@ class ConnectionHandler(object):
         self.req.host = info[0]
         port = len(info) > 1 and int(info[1]) or 80
         if not self.req.host: # 请求头应该包含Host属性， 如没有， 提示无法识别
+            print self.req.first_line, '\033[034m', 'Request UnRecognize.', '\033[0m'
             self.connection.send('HTTP/1.1 403 Forbidden\r\n\r\nRequest UnRecognize.\r\n')
             self.connection.close()
             exit(1)
         if self.req.host == HOST and port == PORT:  # 目标服务器不能是代理服务器
+            print self.req.first_line, '\033[034m', 'Invalid Request!', '\033[0m'
             self.connection.send('HTTP/1.1 403 Forbidden\r\n\r\nInvalid Request!\r\n')
             self.connection.close()
             exit(0)
@@ -191,9 +197,16 @@ class ConnectionHandler(object):
         if 'Host' in self.req.header:
             pack_to_sent += 'Host: ' + self.req.header['Host'] + '\r\n'
             del self.req.header['Host']
+
+        # 去除浏览器的缓存头部信息
+        if hasattr(self.req.header, 'If-None-Match'):
+            del self.req.header['If-None-Match']
+        if hasattr(self.req.header, 'If-Modified-Since'):
+            del self.req.header['If-Modified-Since']
+
         # 报文头
-        if self.req.method == 'GET' and os.path.isfile(Cache_dir + base64.b64encode(self.req.path)):
-            with open(Cache_dir + base64.b64encode(self.req.path)) as f:
+        if self.req.method == 'GET' and os.path.isfile(Cache_dir + self._get_filename(self.req.path)):
+            with open(Cache_dir + self._get_filename(self.req.path)) as f:
                 pack_to_sent += f.read().split('\r\n\r\n', 1)[0]
 
         for key, value in self.req.header.iteritems():
@@ -211,6 +224,7 @@ class ConnectionHandler(object):
             self.target = socket.socket(family)
             self.target.connect(address)
         except socket.error:
+            print self.req.first_line, '\033[034m', 'Bad gateway', '\033[0m'
             self.connection.send('HTTP/1.1 502 Bad gateway\r\n\r\nBad gateway\r\n')
             if hasattr(self, 'target'):
                 self.target.close()
@@ -227,6 +241,7 @@ class ConnectionHandler(object):
         # 接收服务器数据
         rec_buff = self._receive_timeout()
         if not rec_buff:
+            print self.req.first_line, '\033[034m', 'Request timeout 0', '\033[0m'
             self.connection.send('HTTP/1.1 408 Request timeout\r\n\r\nRequest timeout.\r\n');
             self.target.close()
             self.connection.close()
@@ -240,6 +255,7 @@ class ConnectionHandler(object):
             self.res.first_line = headers[0]
             self.res.header = Storage()
         except Exception:  # 返回的信息不完整或者格式错误, 算作超时
+            print self.req.first_line, '\033[034m', 'Request timeout 1', '\033[0m'
             self.connection.send('HTTP/1.1 408 Request timeout\r\n\r\nRequest timeout.\r\n');
             self.target.close()
             self.connection.close()
@@ -262,6 +278,7 @@ class ConnectionHandler(object):
         data=''
 
         begin=time.time()
+        self.startRecive = time.time()
         while True:
             # 收到一些数据，等待超时退出
             if EXIT_FLAG:
@@ -279,15 +296,12 @@ class ConnectionHandler(object):
                 if data:
                     rec_buff += data
                     begin=time.time() # 更新接收开始时间
-                else:
-                    time.sleep(0.1)
-            except:
-                pass
-                # self.connection.send('HTTP/1.1 502 Bad gateway\r\n\r\n');
-                # self.target.close()
-                # self.connection.close()
-                # exit(0)
+                else:     # 接收完毕
+                    break
+            except: # 没有接收到, 等待重试
+                time.sleep(0.1)
 
+        self.receiveTime = time.time() - self.startRecive
         return rec_buff
 
     def _process_response(self):
@@ -304,7 +318,7 @@ class ConnectionHandler(object):
         if self.req.method == 'GET':
             if self.res.status.startswith('304'):
                 self._reply_from_cache()
-            if hasattr(self.res.header, 'Last-Modified') and self.res.status.startswith('200'):
+            elif hasattr(self.res.header, 'Last-Modified') and self.res.status.startswith('200'):
                 self._cache_response()
 
         #  构造报文 起始行
@@ -318,7 +332,7 @@ class ConnectionHandler(object):
         # 发送响应报文头
         self.connection.send(reply_pack)
         # 发送响应报文体
-        print self.req.first_line, '\033[033m', self.res.status, '\033[0m'
+        print self.req.first_line, '\033[033m', self.res.status, '\033[0m', str(self.receiveTime*1000), 'ms'
 
         self.target.close()
 
@@ -356,8 +370,11 @@ class ConnectionHandler(object):
         if hasattr(self.res.header, 'Cache-Control'):
             del self.res.header['Cache-Control']
 
-        with open(Cache_dir + base64.b64encode(self.req.path), 'w') as f:
-            f.write('If-Modified-Since: '+ self.res.header['Last-Modified'] + '\r\n\r\n' + self.res.body)
+        try:
+            with open(Cache_dir + self._get_filename(self.req.path), 'w') as f:
+                f.write('If-Modified-Since: '+ self.res.header['Last-Modified'] + '\r\n\r\n' + self.res.body)
+        except Exception as err:
+            print ('Error: ', err, 'while write ', self.req.path)
 
         if hasattr(self.res.header, 'Last-Modified'):
             del self.res.header['Last-Modified']
@@ -374,12 +391,16 @@ class ConnectionHandler(object):
             del self.res.header['Cache-Control']
         if hasattr(self.res.header, 'Last-Modified'):
             del self.res.header['Last-Modified']
-        # try:
-        print 'read', Cache_dir + base64.b64encode(self.req.path)
-        with open(Cache_dir + base64.b64encode(self.req.path)) as f:
-            self.res.body = f.read().split('\r\n\r\n', 1)[1]
-        # except:
-            # pass
+        try:
+            with open(Cache_dir + self._get_filename(self.req.path)) as f:
+                self.res.body = f.read().split('\r\n\r\n', 1)[1]
+        except Exception as err:
+            print ('Error: ', err, 'while read ', self.req.path)
+
+    def _get_filename(self, path):
+        m = hashlib.md5()
+        m.update(path)
+        return m.hexdigest()
 
 
 class ProxyServer(object):
@@ -403,7 +424,7 @@ class ProxyServer(object):
         tcpSerSock.bind(self.addr)
         tcpSerSock.listen(self.connections)
         # 创建TCP服务器, 循环检查是否有请求
-        print 'Proxy server is running at http://:' + self.host + ':' + str(self.addr[1])
+        print 'Proxy server is running at http://' + self.host + ':' + str(self.addr[1])
         try:
             while True:
                 tcpCliSock, addr = tcpSerSock.accept()  # 收到请求
