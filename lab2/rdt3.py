@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 #coding=utf-8
 
-import time
+import struct, random
+import socket
 
-BUFSIZ = 1024
+BUFSIZ = 4096
 max_timeout = 10
 
 
@@ -24,12 +25,13 @@ class UdpSender(object):
         while True:
             # state 0
             sndpkt = self.make_pkt(0, 'hello')  # 发送0号分组
-            self.udp_send(sndpkt)
+            if random.randint(0, 10) != 1:
+                self.udp_send(sndpkt)
 
             # state 1
             while not self.waiting_ack(0):    # 等待确认0号分组
-                print 'resend 0'
-                sndpkt = self.make_pkt(0, 'hello')  # 发送0号分组
+                # print 'resend 0'
+                sndpkt = self.make_pkt(0, 'hello')  # 重新发送0号分组
                 self.udp_send(sndpkt)
 
             # state 2
@@ -38,7 +40,7 @@ class UdpSender(object):
 
             # state 3
             while not self.waiting_ack(1):    # 等待确认1号分组
-                print 'resend 1'
+                # print 'resend 1'
                 sndpkt = self.make_pkt(1, ' world')  # 重新发送1号分组
                 self.udp_send(sndpkt)
 
@@ -48,143 +50,129 @@ class UdpSender(object):
         '''
         self.udpSendSock.sendto(data, self.addr)
 
-    def make_pkt(self, SN, data):
+    def make_pkt(self, SN, data, FIN=False, ACK=False):
         '''
         将数据打包
-        SN\r\nBODY\r\n\r\n
+        ack|ack_num|seq|seq_num|fin
+        7  |   6   | 5 |  4    | 3
+        BODY
         '''
-        return str(SN) + '\r\n'+ data + '\r\n\r\n'
+        state = 0|0b100000 if not FIN else 0|0b1000
+        state = state|0b10000 if not FIN and SN else state
+        return struct.pack('B', state) + data
 
     def waiting_ack(self, SN):
-        begin = time.time() # 启动计时器
-        rec_buff = ''
-        self.udpSendSock.setblocking(0)
+        self.udpSendSock.settimeout(self.timeout)
         count = 0
 
         while(True):
-            if '\r\n' in rec_buff:
-                break
-            if time.time() - begin > self.timeout:
-                if rec_buff:
-                    print 'ack timeout'
-                    return False
-                else:
-                    count += 1
-            if count == max_timeout:
+            if count >= max_timeout:
                 # 连续超时10次
                 # 接收方已断开
                 break
             try:
                 data, ADDR = self.udpSendSock.recvfrom(BUFSIZ)
-                if data:
-                    rec_buff += data
-                    begin = time.time()
-                else:
-                    break
-            except Exception:
-                time.sleep(0.01)
-        # print rec_buff
-        '''
-        报文格式
-        ACK SN\r\n
-        '''
-        res = rec_buff[:-2].split(' ')
+                self.target = ADDR
 
-        if len(res) >= 2 and res[0] == 'ACK' and res[1] == str(SN):
-            return True
-        else:
-            return False
+                ack, ack_num, seq, seq_num, fin, data = self.analysis_pkt(data)
+                if ack and int(ack_num) == SN:
+                    # 已被正确接收
+                    return True
+                else:
+                    return False
+            except socket.timeout:
+                return False
+
+    def analysis_pkt(self, pkt):
+        '''
+        将数据打包
+        ack|ack_num|seq|seq_num|fin
+        7  |   6   | 5 |  4    | 3
+        BODY
+        '''
+        state = struct.unpack('B', pkt[0])[0]
+        data = pkt[1:]
+        fin = state&0b1000
+        seq_num = (state&0b10000)>>4
+        seq = state&0b100000
+        ack_num = (state&1000000)>>6
+        ack = state&10000000
+        return ack, ack_num, seq, seq_num, fin, data
 
 
 class UdpReceiver(object):
-    def __init__(self, udpRecevSock, timeout = 0.5):
+    def __init__(self, udpRecevSock, timeout = 0.5, max_repeat = 20):
         self.udpRecevSock = udpRecevSock
         self.timeout = timeout
+        self.max_repeat = max_repeat  # 最大分组
 
     def run_test(self):
         while True:
             while not self.waiting_for(0): # 等待接受0号分组
-                nak_pck = self.make_pkt(0)
-                self.udpRecevSock.sendto(nak_pck, self.target)
-
-            ack_pck = self.make_pkt(0, True) # 发送0号分组的确认
-            self.udpRecevSock.sendto(ack_pck, self.target)
+                continue
 
             while not self.waiting_for(1): # 等待接收1号分组
-                nak_pck = self.make_pkt(1)
-                self.udpRecevSock.sendto(nak_pck, self.target)
-
-            ack_pck = self.make_pkt(1, True) # 发送1号分组的确认
-            self.udpRecevSock.sendto(ack_pck, self.target)
+                continue
 
     def waiting_for(self, SN):
         '''
         接收方等待接受SN分组
         '''
-        rec_buff = ''
-        self.udpRecevSock.setblocking(0)
-        start = time.time()
+        self.udpRecevSock.settimeout(self.timeout)
         count = 0
 
         while(True):
             try:
-                if '\r\n\r\n' in rec_buff:
-                    break
-                if time.time() - start > self.timeout:
-                    if rec_buff:
-                        print 'package timeout'
-                        return False
-                    else:
-                        count += 1
-                if count  == max_timeout:
-                    # 连续超时十次
-                    # 重置连接
-                    # reset
+                if count  >= max_timeout:
+                    # 连续超时十次  重置连接  reset
                     pass
                 data, ADDR = self.udpRecevSock.recvfrom(BUFSIZ)
                 self.target = ADDR
-                if data:
-                    rec_buff += data
-                else:
-                    break
-            except:
-                time.sleep(0.01)
-        # print rec_buff
-        '''
-        报文格式
-        SN\r\nBODY\r\n\r\n
-        '''
-        req = rec_buff[:-4].split('\r\n')
-        if len(req) >= 2 and req[0] == str(SN):
-            '''
-            收到SN号报文
-            这里进行对报文的处理
-            '''
-            body = req[1]
-            print body
-            return True
-        else:
-            return False
 
-    def make_pkt(self, SN, isACK = False):
+                ack, ack_num, seq, seq_num, fin, data = self.analysis_pkt(data)
+                if fin:
+                    # 传输结束
+                    return None,True
+                if seq:
+                    ack_pck = self.make_pkt(seq_num, True) # 发送分组的确认
+                    self.udpRecevSock.sendto(ack_pck, self.target)
+                    if int(seq_num) == SN:
+                        return data, False
+                    else:
+                        return False, False
+                else:
+                    nak_pkt = self.make_pkt()
+                    self.udpRecevSock.sendto(nak_pkt, self.target)
+            except socket.timeout:
+                '''
+                timeout
+                '''
+                return False, False
+
+    def analysis_pkt(self, pkt):
+        '''
+        分析数据
+        ack|ack_num|seq|seq_num|fin
+        7  |   6   | 5 |  4    | 3
+        BODY
+        '''
+        state = struct.unpack('B', pkt[0])[0]
+        data = pkt[1:]
+        fin = state&0b1000
+        seq_num = (state&0b10000)>>4
+        seq = state&0b100000
+        ack_num = (state&1000000)>>6
+        ack = state&10000000
+        return ack, ack_num, seq, seq_num, fin, data
+
+    def make_pkt(self, SN = 0, isACK = False):
         '''
         创建确认报文
-        ACK SN\r\n
+        ack|ack_num|seq|seq_num|fin
+        7  |   6   | 5 |  4    | 3
+        BODY
         '''
-        message = 'ACK' if isACK else 'NAK'
-        message += ' ' + str(SN) + '\r\n'
-        return message
-
-if __name__ == '__main__':
-    HOST = ''
-    PORT = 8088
-    BUFSIZ = 1024
-    ADDR = (HOST, PORT)
-
-    import socket
-    udpSerSock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    udpSerSock.bind(ADDR)
-    print 'Server is running at', ADDR
-
-    UdpReceiver(udpSerSock).run_test()
+        state = 0b10000000 if isACK else 0
+        state = state|0b01000000 if isACK and SN else state
+        return struct.pack('B', state)
 

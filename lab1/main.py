@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 #coding=utf-8
 
+__author__ = 'fangwentong'
+
 import threading
 import socket, select
 import time
@@ -17,7 +19,8 @@ HOST = 'localhost' # 主机名
 PORT = 8888        # 端口号
 EXIT_FLAG = 0      # 结束标识
 
-Cache_dir = 'cache/'
+cacheDir = os.path.join(os.path.dirname(__file__), 'cache')
+if not os.path.exists(cacheDir): os.mkdir(cacheDir)
 
 IP_blocked = [
     '128.199.144.88',   # wentong.me
@@ -205,8 +208,9 @@ class ConnectionHandler(object):
             del self.req.header['If-Modified-Since']
 
         # 报文头
-        if self.req.method == 'GET' and os.path.isfile(Cache_dir + self._get_filename(self.req.path)):
-            with open(Cache_dir + self._get_filename(self.req.path)) as f:
+        filename = os.path.join(cacheDir, self._get_filename(self.req.path))
+        if self.req.method == 'GET' and os.path.isfile(filename):
+            with open(filename) as f:
                 pack_to_sent += f.read().split('\r\n\r\n', 1)[0]
 
         for key, value in self.req.header.iteritems():
@@ -363,6 +367,7 @@ class ConnectionHandler(object):
         对get 200请求进行缓存
         '''
         # 删除所有浏览器缓存相关头部
+        # 只为屏蔽浏览器缓存， 正式部署不应过滤
         if hasattr(self.res.header, 'ETag'):
             del self.res.header['ETag']
         if hasattr(self.res.header, 'expires'):
@@ -371,7 +376,8 @@ class ConnectionHandler(object):
             del self.res.header['Cache-Control']
 
         try:
-            with open(Cache_dir + self._get_filename(self.req.path), 'w') as f:
+            filename = os.path.join(cacheDir, self._get_filename(self.req.path))
+            with open(filename, 'w') as f:
                 f.write('If-Modified-Since: '+ self.res.header['Last-Modified'] + '\r\n\r\n' + self.res.body)
         except Exception as err:
             print ('Error: ', err, 'while write ', self.req.path)
@@ -392,7 +398,8 @@ class ConnectionHandler(object):
         if hasattr(self.res.header, 'Last-Modified'):
             del self.res.header['Last-Modified']
         try:
-            with open(Cache_dir + self._get_filename(self.req.path)) as f:
+            filename = os.path.join(cacheDir, self._get_filename(self.req.path))
+            with open(filename) as f:
                 self.res.body = f.read().split('\r\n\r\n', 1)[1]
         except Exception as err:
             print ('Error: ', err, 'while read ', self.req.path)
@@ -445,5 +452,4 @@ class ProxyServer(object):
 if __name__ == '__main__':
     proxySevr = ProxyServer(port = PORT, timeout = TIMEOUT)
     proxySevr.run_server()
-    print 'Proxy server has exit successfully.'
 
