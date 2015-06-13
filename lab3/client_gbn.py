@@ -4,6 +4,10 @@
 import socket
 import gbn
 
+'''
+GBN 协议验证 -- 发送方部分
+'''
+
 HOST = 'localhost'
 PORT = 8088
 BUFSIZ = 1024
