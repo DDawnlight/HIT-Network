@@ -2,7 +2,7 @@
 #coding=utf-8
 
 import socket, os, time
-import rdt3
+import sr
 
 HOST = ''
 PORT = 8088
@@ -13,15 +13,13 @@ SEVER_DIR = 'server'
 udpSerSock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 udpSerSock.bind(ADDR)
 
-udpReceiver = rdt3.UdpReceiver(udpSerSock)
+udpReceiver = sr.UdpReceiver(udpSerSock)
 
 class FileSaver():
     def __init__(self, filename):
         self.filename = filename
         self.fp  = open(os.path.join(SEVER_DIR, filename), 'w+')
 
-    def save_data(self, data):
-        self.fp.write(data)
 
     def close(self):
         self.fp.close()
@@ -30,26 +28,22 @@ def get_filename(suffix = '.jpg'):
     return str(int(time.time())) + suffix
 
 fileSaver = FileSaver(get_filename())
-reset = 0
+def save_data(data, fp):
+    print 'got data length:', len(data)
+    fp.write(data)
+
+reset = False
 
 while True:
     if reset:
         fileSaver.close()
         fileSaver = FileSaver(get_filename())
-        reset = 0
-    while True:  # 等待接受0号分组
-        data, reset = udpReceiver.waiting_for(0)
-        if data:
-            fileSaver.save_data(data)
-            break
-        if reset: break
-    if reset: continue
-
-    while True: # 等待接收1号分组
-        data, reset = udpReceiver.waiting_for(1)
-        if data:
-            fileSaver.save_data(data)
-            break
+        udpReceiver.recv_base = 0
+        for i in range(256):
+            udpReceiver.rcvs[i] = ''
+        reset = False
+    while True:
+        reset = udpReceiver.waiting_for(lambda data: save_data(data, fileSaver.fp))
         if reset: break
     if reset: continue
 

@@ -45,7 +45,7 @@ class UdpSender(object):
         if self.loss_rate == 0 or random.randint(0, int(1/self.loss_rate)) != 1:
             self.udpSendSock.sendto(data, self.addr)
         else:
-            print ('Loss:', data)
+            print ('Loss:', self.next_seq)
         time.sleep(0.3)
 
 
@@ -116,7 +116,7 @@ class UdpSender(object):
         seq_num = struct.unpack('B', pkt[1])[0]
         state = struct.unpack('B', pkt[2])[0]
         window_size = struct.unpack('B', pkt[3])[0]
-        data = pkt[3:]
+        data = pkt[4:]
         fin = state&0b1
         seq = state&0b10
         ack = state&0b100
@@ -154,8 +154,6 @@ class UdpReceiver(object):
         '''
         if self.loss_rate == 0 or random.randint(0, 1/self.loss_rate) != 1:
             self.udpRecvSock.sendto(data, self.target)
-        else:
-            print('Loss: ', data)
 
     def waiting_for(self, dataHandler = lambda x: print(x)):
         '''
@@ -225,7 +223,7 @@ class UdpReceiver(object):
         seq_num = struct.unpack('B', pkt[1])[0]
         state = struct.unpack('B', pkt[2])[0]
         window_size = struct.unpack('B', pkt[3])[0]
-        data = pkt[3:]
+        data = pkt[4:]
         fin = state&0b1
         seq = state&0b10
         ack = state&0b100
